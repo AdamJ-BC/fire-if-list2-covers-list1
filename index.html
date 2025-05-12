@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>IP Whitelist Similarity & Coverage Checker</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+body{font-family:Arial,Helvetica,sans-serif;max-width:960px;margin:0 auto;padding:1rem;background:#f8f9fa;color:#212529;}
+h1{text-align:center;margin-bottom:1rem;}
+textarea{width:100%;height:150px;margin-bottom:1rem;font-family:monospace;padding:.5rem;border:1px solid #ced4da;border-radius:4px;background:#fff;}
+button{display:block;width:220px;margin:0 auto 1rem auto;padding:.6rem;border:none;border-radius:4px;font-size:1rem;cursor:pointer;background:#0d6efd;color:#fff;}
+button:hover{background:#0b5ed7;}
+#indicator{width:20px;height:20px;border-radius:50%;display:inline-block;margin-left:.5rem;vertical-align:middle;border:2px solid #6c757d;}
+#fire{font-size:72px;text-align:center;animation:flame 1s infinite alternate ease-in-out;line-height:1;user-select:none;margin-bottom:1rem;}
+@keyframes flame{from{transform:translateY(0) scale(1) rotate(0deg);opacity:1;}to{transform:translateY(-6px) scale(1.08) rotate(3deg);opacity:.85;}}
+summary{cursor:pointer;font-weight:bold;}
+pre{background:#e9ecef;padding:.5rem;border-radius:4px;white-space:pre-wrap;word-break:break-all;}
+.results-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:1rem;}
+.card{background:#fff;border:1px solid #ced4da;border-radius:4px;padding:1rem;}
+.card h2{margin-top:0;font-size:1.25rem;}
+.hidden{display:none !important;}
+</style>
+</head>
+<body>
+<h1>IP Whitelist Similarity Checker <span id="indicator" title="Similarity indicator"></span></h1>
+
+<label for="input1"><strong>Paste whitelist #1</strong></label>
+<textarea id="input1" placeholder="Paste any text containing IPs or subnets..."></textarea>
+
+<label for="input2"><strong>Paste whitelist #2</strong></label>
+<textarea id="input2" placeholder="Paste any text containing IPs or subnets..."></textarea>
+
+<button id="compareBtn">Compare</button>
+
+<div id="fire" class="hidden" title="All entries in List 1 are covered by List 2">🔥</div>
+
+<div id="summary" class="results-grid hidden">
+  <div class="card">
+    <h2>Whitelist #1</h2>
+    <p>Total unique entries: <strong id="count1">0</strong></p>
+    <p>Duplicates removed:   <strong id="dupeCount1">0</strong></p>
+  </div>
+  <div class="card">
+    <h2>Whitelist #2</h2>
+    <p>Total unique entries: <strong id="count2">0</strong></p>
+    <p>Duplicates removed:   <strong id="dupeCount2">0</strong></p>
+  </div>
+  <div class="card">
+    <h2>Similarity</h2>
+    <p>Entries in both:  <strong id="similarCount">0</strong></p>
+    <p>Similarity ratio: <strong id="similarPct">0%</strong></p>
+  </div>
+  <div class="card">
+    <h2>Difference</h2>
+    <p>Entries unique to either list: <strong id="differentCount">0</strong></p>
+  </div>
+</div>
+
+<details id="similarDetails" class="hidden">
+  <summary>Show Similar Entries</summary>
+  <pre id="similarIPs"></pre>
+</details>
+
+<details id="diffDetails" class="hidden">
+  <summary>Show Different Entries</summary>
+  <pre id="diffIPs"></pre>
+</details>
+
+<details id="dupes1Details" class="hidden">
+  <summary>Show Duplicates in List 1</summary>
+  <pre id="dupesList1"></pre>
+</details>
+
+<details id="dupes2Details" class="hidden">
+  <summary>Show Duplicates in List 2</summary>
+  <pre id="dupesList2"></pre>
+</details>
+
+<script>
+// IPv4 address or CIDR (v4) regex – single back‑slashes!
+const entryRegex = /\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\/\d{1,2})?\b/g;
+
+// Helpers ------------------------------------------------
+const ipToInt = ip => ip.split('.').reduce((acc, oct) => (acc << 8) + parseInt(oct, 10), 0) >>> 0;
+
+function parseCidr(cidr){
+  const [ip, maskBitsStr] = cidr.split('/');
+  const maskBits = parseInt(maskBitsStr, 10);
+  const mask = maskBits === 0 ? 0 : (~((1 << (32 - maskBits)) - 1)) >>> 0;
+  return { network: ipToInt(ip) & mask, maskBits, mask };
+}
+
+const ipInCidr = (ip, cidr) => {
+  const { network, mask } = parseCidr(cidr);
+  return (ipToInt(ip) & mask) === network;
+};
+
+const cidrInCidr = (narrow, wide) => {
+  const a = parseCidr(narrow);
+  const b = parseCidr(wide);
+  if (b.maskBits > a.maskBits) return false; // wide must be equal or shorter prefix
+  return (a.network & b.mask) === b.network;
+};
+
+function extractInfo(text){
+  const matches = text.match(entryRegex) || [];
+  const seen = new Set();
+  const dupes = [];
+  for (const m of matches){
+    if (seen.has(m)) dupes.push(m);
+    else seen.add(m);
+  }
+  return { unique: [...seen], dupes };
+}
+
+// Main comparison ---------------------------------------
+function compare(){
+  const info1 = extractInfo(document.getElementById('input1').value);
+  const info2 = extractInfo(document.getElementById('input2').value);
+
+  const set1 = new Set(info1.unique);
+  const set2 = new Set(info2.unique);
+
+  const similar   = info1.unique.filter(e => set2.has(e));
+  const union     = new Set([...set1, ...set2]);
+  const different = [...union].filter(e => !(set1.has(e) && set2.has(e)));
+  const pct       = union.size ? (similar.length / union.size) * 100 : 0;
+
+  // Coverage: every entry in list1 inside list2
+  const list2IPs   = info2.unique.filter(e => !e.includes('/'));
+  const list2CIDRs = info2.unique.filter(e =>  e.includes('/'));
+
+  const covered = info1.unique.every(entry => {
+    if (!entry.includes('/')){ // plain IP
+      if (list2IPs.includes(entry)) return true;
+      return list2CIDRs.some(cidr => ipInCidr(entry, cidr));
+    } else { // CIDR range
+      if (list2CIDRs.includes(entry)) return true; // identical
+      return list2CIDRs.some(cidr => cidrInCidr(entry, cidr));
+    }
+  });
+
+  updateUI(info1, info2, similar, different, pct, covered);
+}
+
+function updateUI(info1, info2, similar, different, pct, covered){
+  // Reveal hidden blocks
+  ['summary','similarDetails','diffDetails','dupes1Details','dupes2Details'].forEach(id => document.getElementById(id).classList.remove('hidden'));
+
+  // Indicator colour
+  const ind = document.getElementById('indicator');
+  ind.style.background = pct >= 75 ? '#198754' : '#dc3545';
+  ind.title = pct >= 75 ? 'Similarity ≥ 75%' : 'Similarity < 75%';
+
+  // Stats
+  document.getElementById('count1').textContent      = info1.unique.length;
+  document.getElementById('dupeCount1').textContent  = info1.dupes.length;
+  document.getElementById('count2').textContent      = info2.unique.length;
+  document.getElementById('dupeCount2').textContent  = info2.dupes.length;
+  document.getElementById('similarCount').textContent= similar.length;
+  document.getElementById('similarPct').textContent  = pct.toFixed(1) + '%';
+  document.getElementById('differentCount').textContent = different.length;
+
+  // Lists
+  document.getElementById('similarIPs').textContent = similar.length   ? similar.join('\\n')   : '—';
+  document.getElementById('diffIPs').textContent    = different.length ? different.join('\\n') : '—';
+  document.getElementById('dupesList1').textContent = info1.dupes.length ? info1.dupes.join('\\n') : '—';
+  document.getElementById('dupesList2').textContent = info2.dupes.length ? info2.dupes.join('\\n') : '—';
+
+  // Fire animation
+  const fire = document.getElementById('fire');
+  covered && info1.unique.length ? fire.classList.remove('hidden') : fire.classList.add('hidden');
+}
+
+document.getElementById('compareBtn').addEventListener('click', compare);
+</script>
+</body>
+</html>
